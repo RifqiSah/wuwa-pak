@@ -1,4 +1,4 @@
-use byteorder::{ReadBytesExt, WriteBytesExt, LE};
+use byteorder::{ReadBytesExt, LE};
 
 pub trait ReadExt {
   fn read_bool(&mut self) -> Result<bool, std::io::Error>;
@@ -16,7 +16,7 @@ pub trait ReadExt {
   fn read_len(&mut self, len: usize) -> Result<Vec<u8>, std::io::Error>;
 }
 
-impl<R: std::io::Read> ReadExt for R {
+impl<R: std::io::Read + std::io::Seek> ReadExt for R {
   fn read_bool(&mut self) -> Result<bool, std::io::Error> {
     match self.read_u8()? {
       1 => Ok(true),

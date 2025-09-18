@@ -1,4 +1,4 @@
-use std::{fs::File, io::{self, BufReader, Read as _, Seek as _}};
+use std::{io::{self, Cursor, Read as _, Seek as _}};
 
 use byteorder::{ReadBytesExt as _, LE};
 
@@ -19,7 +19,9 @@ pub struct PakFooter {
   pub compression: Vec<String>,
 }
 
-pub fn read_footer(reader: &mut BufReader<File>) -> Result<PakFooter, Box<dyn std::error::Error>> {
+pub fn read_footer(buf: &[u8]) -> Result<PakFooter, Box<dyn std::error::Error>> {
+  let mut reader = Cursor::new(buf);
+
   // (magic + version): u32 + (offset + size): u64 + hash: [u8; 20]
   let size = 4 + 4 + 8 + 8 + 20
     + 16 // encryption uuid: u128

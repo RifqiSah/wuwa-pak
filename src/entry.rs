@@ -1,10 +1,7 @@
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, BufReader, Cursor, Read as _, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read as _, Seek, Write};
 use aes::Aes256;
 use byteorder::{ReadBytesExt, LE};
-use cipher::generic_array::GenericArray;
-use cipher::{BlockDecrypt as _, KeyInit as _};
+use cipher::BlockDecrypt as _;
 
 use crate::ext::ReadExt as _;
 use crate::footer::PakFooter;
@@ -166,7 +163,7 @@ pub fn read_encoded<R: io::Read>(reader: &mut R) -> Result<Entry, std::io::Error
   })
 }
 
-fn entry_read<R: io::Read>(reader: &mut R) -> Result<Entry, Box<dyn std::error::Error>> {
+fn entry_read(reader: &mut Cursor<&[u8]>) -> Result<Entry, Box<dyn std::error::Error>> {
   let offset = reader.read_u64::<LE>()?;
   let compressed = reader.read_u64::<LE>()?;
   let uncompressed = reader.read_u64::<LE>()?;
@@ -185,15 +182,15 @@ fn entry_read<R: io::Read>(reader: &mut R) -> Result<Entry, Box<dyn std::error::
   let compression_block_size = reader.read_u32::<LE>()?;
 
   Ok(Entry {
-      offset,
-      compressed,
-      uncompressed,
-      compression_slot: compression,
-      timestamp: None,
-      // hash,
-      blocks,
-      flags,
-      compression_block_size,
+    offset,
+    compressed,
+    uncompressed,
+    compression_slot: compression,
+    timestamp: None,
+    // hash,
+    blocks,
+    flags,
+    compression_block_size,
   })
 }
 
@@ -210,17 +207,22 @@ fn parse_compression_array(strings: &[String]) -> Vec<Option<Compression>> {
   }).collect()
 }
 
-pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &PakFooter, path: &String, entry: &Entry) -> Result<(), Box<dyn std::error::Error>> {
+pub fn read_file(buf: &[u8], key: &Aes256, footer: &PakFooter, path: &String, entry: &Entry) -> Result<(), Box<dyn std::error::Error>> {
+  let mut reader = Cursor::new(buf);
+
   let mut decompressed = Vec::new();
 
-  println!("\nReading {} {:?}", path, entry);
+  println!("\nReading {}", path);
+  println!("File entry: {:?}", entry);
 
   // seek to target offset
-  reader.seek(io::SeekFrom::Start(entry.offset))?;
-  let entry_read = entry_read(reader)?;
-  // println!("{:?}", entry_read);
+  // reader.seek(io::SeekFrom::Start(entry.offset))?;
+  reader.seek(io::SeekFrom::Start(0))?;
+  let entry_read = entry_read(&mut reader)?;
+  // println!("Entry read {:?}", entry_read);
 
   let data_offset = reader.stream_position()?;
+  // println!("Data offset {}", data_offset);
 
   let is_encrypted = true; // TODO
   let mut data = reader.read_len(match is_encrypted {
@@ -228,7 +230,7 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
     false => entry.compressed,
   } as usize)?;
 
-  // print!("Plain: ");
+  // println!("Plain: {} bytes", data.len());
   // for b in &data {
   //   print!("{:02X} ", b);
   // }
@@ -245,16 +247,35 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
     data.truncate(entry.compressed as usize);
   }
 
-  // print!("After decrypt: ");
+  // println!("After decrypt: {} bytes", data.len());
   // for b in &data {
   //   print!("{:02X} ", b);
   // }
   // println!("");
 
   // compression
+  // let buffer_start = if let Some(blocks) = &entry.blocks {
+  //   blocks[0].start
+  // } else {
+  //   entry.offset
+  // };
+
+  // let ranges = match &entry.blocks {
+  //   Some(blocks) => blocks
+  //     .iter()
+  //     .map(|block| {
+  //       let start = (block.start - buffer_start) as usize;
+  //       let end   = (block.end   - buffer_start) as usize;
+  //       start..end
+  //     })
+  //     .collect::<Vec<_>>(),
+  //   None => vec![0..data.len()],
+  // };
+
   let ranges = {
     let offset = |index: u64| -> usize {
-      (index - (data_offset - entry.offset)) as usize
+      // (index - (data_offset - entry.offset)) as usize
+      (index - (data_offset)) as usize
     };
 
     match &entry.blocks {
@@ -266,6 +287,8 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
     }
   };
 
+  // println!("Ranges: {:?}", ranges);
+
   macro_rules! decompress {
     ($decompressor: ty) => {
       for range in ranges {
@@ -276,10 +299,10 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
   
   let compression_slot: Option<u32> = entry.compression_slot;
   let compression_slots = parse_compression_array(&footer.compression);
-  // println!("Compression slots: {:?}", compression_slots);
+  println!("Available compression: {:?}", compression_slots);
 
   let selected: Option<Compression> = compression_slot.and_then(|c| compression_slots.get(c as usize).copied().flatten());
-  // println!("Selected compression: {:?}", selected);
+  println!("Selected compression: {:?}", selected);
 
   match selected {
     None => decompressed.write_all(&data)?,
@@ -322,7 +345,7 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
   }
 
   let str = String::from_utf8_lossy(&decompressed);
-  println!("{:?}", str);
+  println!("\nData:\n{}", str);
 
   Ok(())
 }
