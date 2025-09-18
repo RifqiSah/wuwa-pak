@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   // footer
   let footer_size = 221;
   let footer_buffer = fetch::fetch_range(url, total_size - footer_size, total_size).await?;
-  let _footer = crate::footer::read_footer(&footer_buffer);
+  let _footer = footer::read_footer(&footer_buffer);
   let Ok(footer) = _footer else {
     return Err("Unable to read pak metadata!".into());
   };
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   // println!("{:?}", index_buffer);
 
-  let _index = crate::index::get_index(&index_buffer, &key, &footer);
+  let _index = index::get_index(&index_buffer, &key, &footer);
   let Ok(index) = _index else {
     return Err("Unable to read pak index!".into());
   };
