@@ -3,6 +3,11 @@ name = "wuwa-pak"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["file"]
+file = []
+online = []
+
 [dependencies]
 tokio = { version = "1.47.1", features = ["full"] }
 byteorder = "1.5.0"

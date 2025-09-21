@@ -16,7 +16,17 @@ pub trait ReadExt {
   fn read_len(&mut self, len: usize) -> Result<Vec<u8>, std::io::Error>;
 }
 
-impl<R: std::io::Read + std::io::Seek> ReadExt for R {
+#[cfg(feature = "online")]
+pub trait ReadSeek: std::io::Read + std::io::Seek {}
+#[cfg(feature = "online")]
+impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
+
+#[cfg(feature = "file")]
+pub trait ReadSeek: std::io::Read {}
+#[cfg(feature = "file")]
+impl<T: std::io::Read> ReadSeek for T {}
+
+impl<R: ReadSeek> ReadExt for R {
   fn read_bool(&mut self) -> Result<bool, std::io::Error> {
     match self.read_u8()? {
       1 => Ok(true),

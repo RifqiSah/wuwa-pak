@@ -1,4 +1,17 @@
-use std::{io::{self, Cursor, Read as _, Seek as _}};
+use std::io;
+
+#[cfg(feature = "file")]
+use {
+  std::fs::File,
+  std::io::BufReader,
+  std::io::{Read as _, Seek as _},
+};
+
+#[cfg(feature = "online")]
+use {
+  std::io::Cursor,
+  std::io::{Read as _, Seek as _},
+};
 
 use byteorder::{ReadBytesExt as _, LE};
 
@@ -19,8 +32,15 @@ pub struct PakFooter {
   pub compression: Vec<String>,
 }
 
-pub fn read_footer(buf: &[u8]) -> Result<PakFooter, Box<dyn std::error::Error>> {
-  let mut reader = Cursor::new(buf);
+#[cfg(feature = "file")]
+type Source<'a> = &'a mut BufReader<File>;
+
+#[cfg(feature = "online")]
+type Source<'a> = &'a [u8];
+
+pub fn read_footer(reader: Source) -> Result<PakFooter, Box<dyn std::error::Error>> {
+  #[cfg(feature = "online")]
+  let mut reader = Cursor::new(reader);
 
   // (magic + version): u32 + (offset + size): u64 + hash: [u8; 20]
   let size = 4 + 4 + 8 + 8 + 20

@@ -1,4 +1,18 @@
-use std::{collections::BTreeMap, io::{self, Cursor, Read as _, Seek as _}};
+use std::collections::BTreeMap;
+use std::io;
+
+#[cfg(feature = "file")]
+use {
+  std::fs::File,
+  std::io::BufReader,
+  std::io::{Read as _, Seek as _},
+};
+
+#[cfg(feature = "online")]
+use {
+  std::io::Cursor,
+  std::io::{Read as _, Seek as _},
+};
 
 use aes::Aes256;
 use byteorder::{ReadBytesExt as _, LE};
@@ -13,16 +27,26 @@ pub struct Index {
   pub entries: BTreeMap<String, super::entry::Entry>,
 }
 
-// pub fn get_index(reader: &mut BufReader<File>, key: &Aes256, footer: &PakFooter) -> Result<Index, Box<dyn std::error::Error>> {
-pub fn get_index(buf: &[u8], key: &Aes256, footer: &PakFooter) -> Result<Index, Box<dyn std::error::Error>> {
-  let mut reader = Cursor::new(buf);
+#[cfg(feature = "file")]
+type Source<'a> = &'a mut BufReader<File>;
+
+#[cfg(feature = "online")]
+type Source<'a> = &'a [u8];
+
+pub fn get_index(reader: Source, key: &Aes256, footer: &PakFooter) -> Result<Index, Box<dyn std::error::Error>> {
+  #[cfg(feature = "online")]
+  let mut reader = Cursor::new(reader);
   
   let len = footer.index_size as usize;  
   let mut _index = vec![0; len];
 
   // read index
-  // reader.seek(io::SeekFrom::Start(footer.index_offset))?;
+  #[cfg(feature = "online")]
   reader.seek(io::SeekFrom::Start(0))?;
+
+  #[cfg(feature = "file")]
+  reader.seek(io::SeekFrom::Start(footer.index_offset))?;
+
   reader.read_exact(&mut _index)?;
   
   // is encrypted?
@@ -49,8 +73,11 @@ pub fn get_index(buf: &[u8], key: &Aes256, footer: &PakFooter) -> Result<Index, 
     let path_hash_index_size = index.read_u64::<LE>()?;
     let _path_hash_index_hash = index.read_len(20)?;
 
-    let new_path_hash_index_offset = path_hash_index_offset - footer.index_offset;
-    reader.seek(io::SeekFrom::Start(new_path_hash_index_offset))?;
+    #[cfg(feature = "online")]
+    reader.seek(io::SeekFrom::Start(path_hash_index_offset - footer.index_offset))?;
+
+    #[cfg(feature = "file")]
+    reader.seek(io::SeekFrom::Start(path_hash_index_offset))?;
 
     let mut path_hash_index_buf = reader.read_len(path_hash_index_size as usize)?;
     // TODO verify hash
@@ -85,8 +112,11 @@ pub fn get_index(buf: &[u8], key: &Aes256, footer: &PakFooter) -> Result<Index, 
     let full_directory_index_size = index.read_u64::<LE>()?;
     let _full_directory_index_hash = index.read_len(20)?;
 
-    let new_full_directory_index_offset = full_directory_index_offset - footer.index_offset;
-    reader.seek(io::SeekFrom::Start(new_full_directory_index_offset))?;
+    #[cfg(feature = "online")]
+    reader.seek(io::SeekFrom::Start(full_directory_index_offset - footer.index_offset))?;
+
+    #[cfg(feature = "file")]
+    reader.seek(io::SeekFrom::Start(full_directory_index_offset))?;
 
     let mut full_directory_index = reader.read_len(full_directory_index_size as usize)?;
     // TODO verify hash

@@ -1,9 +1,23 @@
-use std::io::{self, Cursor, Read as _, Seek, Write};
+use std::io;
+use std::io::Seek as _;
+use std::io::Write;
+
+#[cfg(feature = "file")]
+use {
+  std::fs::File,
+  std::io::BufReader,
+};
+
+#[cfg(feature = "online")]
+use {
+  std::io::Cursor,
+};
+
 use aes::Aes256;
 use byteorder::{ReadBytesExt, LE};
 use cipher::BlockDecrypt as _;
 
-use crate::ext::ReadExt as _;
+use crate::ext::ReadExt;
 use crate::footer::PakFooter;
 
 #[derive(Debug, Clone, Copy)]
@@ -75,18 +89,18 @@ fn offset_reader<R: io::Read>(reader: &mut R, bits: u32) -> Result<(u64, u64), s
 pub fn get_serialized_size(compression: Option<u32>, block_count: u32) -> u64 {
   let mut size = 0;
 
-  size += 8; // offset
-  size += 8; // compressed
-  size += 8; // uncompressed
-  size += 4; // 32 bit compression
-  size += 0; // timestamp
+  size += 8;  // offset
+  size += 8;  // compressed
+  size += 8;  // uncompressed
+  size += 4;  // 32 bit compression
+  size += 0;  // timestamp
   size += 20; // hash
   size += match compression {
     Some(_) => 4 + (8 + 8) * block_count as u64, // blocks
     None => 0,
   };
-  size += 1; // encrypted
-  size += 4; // blocks uncompressed
+  size += 1;  // encrypted
+  size += 4;  // blocks uncompressed
 
   size
 }
@@ -163,13 +177,13 @@ pub fn read_encoded<R: io::Read>(reader: &mut R) -> Result<Entry, std::io::Error
   })
 }
 
-fn entry_read(reader: &mut Cursor<&[u8]>) -> Result<Entry, Box<dyn std::error::Error>> {
+fn entry_read<R: io::Read + ReadExt>(reader: &mut R) -> Result<Entry, Box<dyn std::error::Error>> {
   let offset = reader.read_u64::<LE>()?;
   let compressed = reader.read_u64::<LE>()?;
   let uncompressed = reader.read_u64::<LE>()?;
   let compression = match reader.read_u32::<LE>()? {
-    0 => None,        // 0 = tidak dikompresi
-    n => Some(n - 1), // slot disimpan 1-based, dikurangi 1 untuk index 0-based
+    0 => None, // 0 = not compressed
+    n => Some(n - 1), // slot saved in 1-based, -1 for index 0-based
   };
   // let timestamp = (ver == VersionMajor::Initial).then_try(|| reader.read_u64::<LE>())?;
   // let hash = Some(Hash(reader.read_guid()?));
@@ -207,8 +221,15 @@ fn parse_compression_array(strings: &[String]) -> Vec<Option<Compression>> {
   }).collect()
 }
 
-pub fn read_file(buf: &[u8], key: &Aes256, footer: &PakFooter, path: &String, entry: &Entry) -> Result<(), Box<dyn std::error::Error>> {
-  let mut reader = Cursor::new(buf);
+#[cfg(feature = "file")]
+type Source<'a> = &'a mut BufReader<File>;
+
+#[cfg(feature = "online")]
+type Source<'a> = &'a [u8];
+
+pub fn read_file(mut reader: Source, key: &Aes256, footer: &PakFooter, path: &String, entry: &Entry) -> Result<(), Box<dyn std::error::Error>> {
+  #[cfg(feature = "online")]
+  let mut reader = Cursor::new(reader);
 
   let mut decompressed = Vec::new();
 
@@ -216,9 +237,18 @@ pub fn read_file(buf: &[u8], key: &Aes256, footer: &PakFooter, path: &String, en
   println!("File entry: {:?}", entry);
 
   // seek to target offset
-  // reader.seek(io::SeekFrom::Start(entry.offset))?;
-  reader.seek(io::SeekFrom::Start(0))?;
-  let entry_read = entry_read(&mut reader)?;
+  #[cfg(feature = "file")]
+  {
+    reader.seek(io::SeekFrom::Start(entry.offset))?;
+    let entry_read = entry_read(&mut reader)?;
+  }
+
+  #[cfg(feature = "online")]
+  {
+    reader.seek(io::SeekFrom::Start(0))?;
+    let entry_read = entry_read(&mut reader)?;
+  }
+
   // println!("Entry read {:?}", entry_read);
 
   let data_offset = reader.stream_position()?;
@@ -254,28 +284,15 @@ pub fn read_file(buf: &[u8], key: &Aes256, footer: &PakFooter, path: &String, en
   // println!("");
 
   // compression
-  // let buffer_start = if let Some(blocks) = &entry.blocks {
-  //   blocks[0].start
-  // } else {
-  //   entry.offset
-  // };
-
-  // let ranges = match &entry.blocks {
-  //   Some(blocks) => blocks
-  //     .iter()
-  //     .map(|block| {
-  //       let start = (block.start - buffer_start) as usize;
-  //       let end   = (block.end   - buffer_start) as usize;
-  //       start..end
-  //     })
-  //     .collect::<Vec<_>>(),
-  //   None => vec![0..data.len()],
-  // };
-
   let ranges = {
+    #[cfg(feature = "file")]
     let offset = |index: u64| -> usize {
-      // (index - (data_offset - entry.offset)) as usize
-      (index - (data_offset)) as usize
+      (index - (data_offset - entry.offset)) as usize
+    };
+
+    #[cfg(feature = "online")]
+    let offset = |index: u64| -> usize {
+      (index - data_offset) as usize
     };
 
     match &entry.blocks {
@@ -286,8 +303,6 @@ pub fn read_file(buf: &[u8], key: &Aes256, footer: &PakFooter, path: &String, en
       None => vec![0..data.len()],
     }
   };
-
-  // println!("Ranges: {:?}", ranges);
 
   macro_rules! decompress {
     ($decompressor: ty) => {
