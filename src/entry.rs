@@ -1,12 +1,23 @@
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, BufReader, Cursor, Read as _, Seek, SeekFrom, Write};
+use std::io;
+use std::io::Seek as _;
+use std::io::Write;
+
+#[cfg(feature = "file")]
+use {
+  std::fs::File,
+  std::io::BufReader,
+};
+
+#[cfg(feature = "online")]
+use {
+  std::io::Cursor,
+};
+
 use aes::Aes256;
 use byteorder::{ReadBytesExt, LE};
-use cipher::generic_array::GenericArray;
-use cipher::{BlockDecrypt as _, KeyInit as _};
+use cipher::BlockDecrypt as _;
 
-use crate::ext::ReadExt as _;
+use crate::ext::ReadExt;
 use crate::footer::PakFooter;
 
 #[derive(Debug, Clone, Copy)]
@@ -78,18 +89,18 @@ fn offset_reader<R: io::Read>(reader: &mut R, bits: u32) -> Result<(u64, u64), s
 pub fn get_serialized_size(compression: Option<u32>, block_count: u32) -> u64 {
   let mut size = 0;
 
-  size += 8; // offset
-  size += 8; // compressed
-  size += 8; // uncompressed
-  size += 4; // 32 bit compression
-  size += 0; // timestamp
+  size += 8;  // offset
+  size += 8;  // compressed
+  size += 8;  // uncompressed
+  size += 4;  // 32 bit compression
+  size += 0;  // timestamp
   size += 20; // hash
   size += match compression {
     Some(_) => 4 + (8 + 8) * block_count as u64, // blocks
     None => 0,
   };
-  size += 1; // encrypted
-  size += 4; // blocks uncompressed
+  size += 1;  // encrypted
+  size += 4;  // blocks uncompressed
 
   size
 }
@@ -166,13 +177,13 @@ pub fn read_encoded<R: io::Read>(reader: &mut R) -> Result<Entry, std::io::Error
   })
 }
 
-fn entry_read<R: io::Read>(reader: &mut R) -> Result<Entry, Box<dyn std::error::Error>> {
+fn entry_read<R: io::Read + ReadExt>(reader: &mut R) -> Result<Entry, Box<dyn std::error::Error>> {
   let offset = reader.read_u64::<LE>()?;
   let compressed = reader.read_u64::<LE>()?;
   let uncompressed = reader.read_u64::<LE>()?;
   let compression = match reader.read_u32::<LE>()? {
-    0 => None,        // 0 = tidak dikompresi
-    n => Some(n - 1), // slot disimpan 1-based, dikurangi 1 untuk index 0-based
+    0 => None, // 0 = not compressed
+    n => Some(n - 1), // slot saved in 1-based, -1 for index 0-based
   };
   // let timestamp = (ver == VersionMajor::Initial).then_try(|| reader.read_u64::<LE>())?;
   // let hash = Some(Hash(reader.read_guid()?));
@@ -185,15 +196,15 @@ fn entry_read<R: io::Read>(reader: &mut R) -> Result<Entry, Box<dyn std::error::
   let compression_block_size = reader.read_u32::<LE>()?;
 
   Ok(Entry {
-      offset,
-      compressed,
-      uncompressed,
-      compression_slot: compression,
-      timestamp: None,
-      // hash,
-      blocks,
-      flags,
-      compression_block_size,
+    offset,
+    compressed,
+    uncompressed,
+    compression_slot: compression,
+    timestamp: None,
+    // hash,
+    blocks,
+    flags,
+    compression_block_size,
   })
 }
 
@@ -210,17 +221,38 @@ fn parse_compression_array(strings: &[String]) -> Vec<Option<Compression>> {
   }).collect()
 }
 
-pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &PakFooter, path: &String, entry: &Entry) -> Result<(), Box<dyn std::error::Error>> {
+#[cfg(feature = "file")]
+type Source<'a> = &'a mut BufReader<File>;
+
+#[cfg(feature = "online")]
+type Source<'a> = &'a [u8];
+
+pub fn read_file(mut reader: Source, key: &Aes256, footer: &PakFooter, path: &String, entry: &Entry) -> Result<(), Box<dyn std::error::Error>> {
+  #[cfg(feature = "online")]
+  let mut reader = Cursor::new(reader);
+
   let mut decompressed = Vec::new();
 
-  println!("\nReading {} {:?}", path, entry);
+  println!("\nReading {}", path);
+  println!("File entry: {:?}", entry);
 
   // seek to target offset
-  reader.seek(io::SeekFrom::Start(entry.offset))?;
-  let entry_read = entry_read(reader)?;
-  // println!("{:?}", entry_read);
+  #[cfg(feature = "file")]
+  {
+    reader.seek(io::SeekFrom::Start(entry.offset))?;
+    let entry_read = entry_read(&mut reader)?;
+  }
+
+  #[cfg(feature = "online")]
+  {
+    reader.seek(io::SeekFrom::Start(0))?;
+    let entry_read = entry_read(&mut reader)?;
+  }
+
+  // println!("Entry read {:?}", entry_read);
 
   let data_offset = reader.stream_position()?;
+  // println!("Data offset {}", data_offset);
 
   let is_encrypted = true; // TODO
   let mut data = reader.read_len(match is_encrypted {
@@ -228,7 +260,7 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
     false => entry.compressed,
   } as usize)?;
 
-  // print!("Plain: ");
+  // println!("Plain: {} bytes", data.len());
   // for b in &data {
   //   print!("{:02X} ", b);
   // }
@@ -245,7 +277,7 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
     data.truncate(entry.compressed as usize);
   }
 
-  // print!("After decrypt: ");
+  // println!("After decrypt: {} bytes", data.len());
   // for b in &data {
   //   print!("{:02X} ", b);
   // }
@@ -253,8 +285,14 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
 
   // compression
   let ranges = {
+    #[cfg(feature = "file")]
     let offset = |index: u64| -> usize {
       (index - (data_offset - entry.offset)) as usize
+    };
+
+    #[cfg(feature = "online")]
+    let offset = |index: u64| -> usize {
+      (index - data_offset) as usize
     };
 
     match &entry.blocks {
@@ -276,10 +314,10 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
   
   let compression_slot: Option<u32> = entry.compression_slot;
   let compression_slots = parse_compression_array(&footer.compression);
-  // println!("Compression slots: {:?}", compression_slots);
+  println!("Available compression: {:?}", compression_slots);
 
   let selected: Option<Compression> = compression_slot.and_then(|c| compression_slots.get(c as usize).copied().flatten());
-  // println!("Selected compression: {:?}", selected);
+  println!("Selected compression: {:?}", selected);
 
   match selected {
     None => decompressed.write_all(&data)?,
@@ -322,7 +360,7 @@ pub fn read_file<R: io::Read + io::Seek>(reader: &mut R, key: &Aes256, footer: &
   }
 
   let str = String::from_utf8_lossy(&decompressed);
-  println!("{:?}", str);
+  println!("\nData:\n{}", str);
 
   Ok(())
 }
